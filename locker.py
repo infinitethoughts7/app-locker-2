@@ -26,8 +26,6 @@ def load_config():
 
 def authenticate(app_name: str) -> bool:
     """Trigger Touch ID authentication with password fallback"""
-    time.sleep(0.5)
-    
     context = LAContext()
     
     can_evaluate, error = context.canEvaluatePolicy_error_(
@@ -43,7 +41,7 @@ def authenticate(app_name: str) -> bool:
     def callback(success, error):
         result["success"] = success
         result["done"] = True
-        if error:
+        if not success and error:
             print(f"Auth error: {error}")
     
     context.evaluatePolicy_localizedReason_reply_(
@@ -104,18 +102,19 @@ class AppLaunchObserver(NSObject):
             return
         
         if self.pending_auth:
+            # Kill duplicate while auth in progress
             app.terminate()
             return
         
-        print(f"Locked app detected: {app_name}")
+        print(f"Locked app detected: {app_name} (PID: {pid})")
         
-        app.hide()
-        
+        # DON'T HIDE - just store and schedule auth
         self.pending_auth = True
         self.pending_app = (app_name, app, pid)
         
+        # Quick delay then auth
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.3, self, "performAuth:", None, False
+            0.5, self, "performAuth:", None, False
         )
     
     def performAuth_(self, timer):
@@ -131,14 +130,19 @@ class AppLaunchObserver(NSObject):
             self.pending_auth = False
             return
         
-        if authenticate(app_name):
+        # Show auth dialog (app stays visible but dialog is modal)
+        success = authenticate(app_name)
+        
+        if success:
             print(f"✅ Authenticated: {app_name}")
             self.authenticated_pids.add(pid)
-            app.unhide()
-            app.activateWithOptions_(0)
+            # App is already visible, just activate it
+            if not app.isTerminated():
+                app.activateWithOptions_(1)
         else:
             print(f"❌ Auth failed, terminating: {app_name}")
-            app.terminate()
+            if not app.isTerminated():
+                app.terminate()
         
         self.pending_auth = False
     
