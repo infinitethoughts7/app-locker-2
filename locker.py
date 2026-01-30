@@ -15,12 +15,10 @@ import objc
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
-# Grace period after auth - ignore same app for this many seconds
 AUTH_GRACE_PERIOD = 10
 
 
 def load_config():
-    """Load locked apps list from config"""
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
             return json.load(f)
@@ -28,7 +26,6 @@ def load_config():
 
 
 def authenticate(app_name: str) -> bool:
-    """Trigger Touch ID authentication with password fallback"""
     context = LAContext()
     
     can_evaluate, error = context.canEvaluatePolicy_error_(
@@ -66,7 +63,6 @@ def authenticate(app_name: str) -> bool:
 
 
 class AppLaunchObserver(NSObject):
-    """Observes app launches and triggers auth for locked apps"""
     
     def init(self):
         self = objc.super(AppLaunchObserver, self).init()
@@ -74,13 +70,12 @@ class AppLaunchObserver(NSObject):
             return None
         self.config = load_config()
         self.authenticated_pids = set()
-        self.authenticated_apps = {}  # app_name -> timestamp of last auth
+        self.authenticated_apps = {}
         self.pending_auth = False
         self.pending_app = None
         return self
     
     def startObserving(self):
-        """Start watching for app launches"""
         workspace = NSWorkspace.sharedWorkspace()
         center = workspace.notificationCenter()
         
@@ -93,7 +88,6 @@ class AppLaunchObserver(NSObject):
         print("AppLocker running. Watching for:", self.config["locked_apps"])
     
     def appDidLaunch_(self, notification):
-        """Called when any app launches"""
         app_info = notification.userInfo()
         app_name = app_info["NSApplicationName"]
         app = app_info["NSWorkspaceApplicationKey"]
@@ -102,21 +96,17 @@ class AppLaunchObserver(NSObject):
         if app_name not in self.config["locked_apps"]:
             return
         
-        # Check if this PID already authenticated
         if pid in self.authenticated_pids:
-            print(f"[SKIP] {app_name} PID {pid} already authenticated")
             return
         
-        # Check grace period - if same app authenticated recently, skip
         if app_name in self.authenticated_apps:
             elapsed = time.time() - self.authenticated_apps[app_name]
             if elapsed < AUTH_GRACE_PERIOD:
-                print(f"[SKIP] {app_name} in grace period ({elapsed:.1f}s < {AUTH_GRACE_PERIOD}s)")
-                self.authenticated_pids.add(pid)  # Mark this PID as OK too
+                print(f"[SKIP] {app_name} in grace period")
+                self.authenticated_pids.add(pid)
                 return
         
         if self.pending_auth:
-            print(f"[SKIP] Auth pending, ignoring {app_name}")
             return
         
         print(f"Locked app detected: {app_name} (PID: {pid})")
@@ -129,7 +119,6 @@ class AppLaunchObserver(NSObject):
         )
     
     def performAuth_(self, timer):
-        """Perform authentication after delay"""
         if not self.pending_app:
             self.pending_auth = False
             return
@@ -138,7 +127,6 @@ class AppLaunchObserver(NSObject):
         self.pending_app = None
         
         if app.isTerminated():
-            print(f"[SKIP] {app_name} already terminated before auth")
             self.pending_auth = False
             return
         
@@ -147,8 +135,26 @@ class AppLaunchObserver(NSObject):
         if success:
             print(f"✅ Authenticated: {app_name}")
             self.authenticated_pids.add(pid)
-            self.authenticated_apps[app_name] = time.time()  # Start grace period
-            # Don't do anything else - let the app run naturally
+            self.authenticated_apps[app_name] = time.time()
+            
+            # Debug: check app state
+            print(f"[DEBUG] App terminated? {app.isTerminated()}")
+            print(f"[DEBUG] App hidden? {app.isHidden()}")
+            print(f"[DEBUG] App active? {app.isActive()}")
+            
+            if not app.isTerminated():
+                # Force unhide and activate
+                if app.isHidden():
+                    print("[DEBUG] Unhiding app...")
+                    app.unhide()
+                
+                time.sleep(0.3)
+                
+                print("[DEBUG] Activating app...")
+                app.activateWithOptions_(1)  # NSApplicationActivateIgnoringOtherApps
+                
+                time.sleep(0.2)
+                print(f"[DEBUG] App active now? {app.isActive()}")
         else:
             print(f"❌ Auth failed, terminating: {app_name}")
             if not app.isTerminated():
@@ -157,7 +163,6 @@ class AppLaunchObserver(NSObject):
         self.pending_auth = False
     
     def reloadConfig(self):
-        """Reload config without restart"""
         self.config = load_config()
         print("Config reloaded:", self.config["locked_apps"])
 
