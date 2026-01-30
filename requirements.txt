@@ -1,4 +1,1 @@
-pyobjc-core>=9.0
-pyobjc-framework-Cocoa>=9.0
-pyobjc-framework-LocalAuthentication>=9.0
-pyobjc-framework-Quartz>=9.0
+psutil>=5.9.0
