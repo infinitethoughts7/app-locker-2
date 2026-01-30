@@ -15,6 +15,9 @@ import objc
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
+# Grace period after auth - ignore same app for this many seconds
+AUTH_GRACE_PERIOD = 10
+
 
 def load_config():
     """Load locked apps list from config"""
@@ -71,6 +74,7 @@ class AppLaunchObserver(NSObject):
             return None
         self.config = load_config()
         self.authenticated_pids = set()
+        self.authenticated_apps = {}  # app_name -> timestamp of last auth
         self.pending_auth = False
         self.pending_app = None
         return self
@@ -98,23 +102,30 @@ class AppLaunchObserver(NSObject):
         if app_name not in self.config["locked_apps"]:
             return
         
+        # Check if this PID already authenticated
         if pid in self.authenticated_pids:
+            print(f"[SKIP] {app_name} PID {pid} already authenticated")
             return
         
+        # Check grace period - if same app authenticated recently, skip
+        if app_name in self.authenticated_apps:
+            elapsed = time.time() - self.authenticated_apps[app_name]
+            if elapsed < AUTH_GRACE_PERIOD:
+                print(f"[SKIP] {app_name} in grace period ({elapsed:.1f}s < {AUTH_GRACE_PERIOD}s)")
+                self.authenticated_pids.add(pid)  # Mark this PID as OK too
+                return
+        
         if self.pending_auth:
-            # Kill duplicate while auth in progress
-            app.terminate()
+            print(f"[SKIP] Auth pending, ignoring {app_name}")
             return
         
         print(f"Locked app detected: {app_name} (PID: {pid})")
         
-        # DON'T HIDE - just store and schedule auth
         self.pending_auth = True
         self.pending_app = (app_name, app, pid)
         
-        # Quick delay then auth
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.5, self, "performAuth:", None, False
+            0.3, self, "performAuth:", None, False
         )
     
     def performAuth_(self, timer):
@@ -127,18 +138,17 @@ class AppLaunchObserver(NSObject):
         self.pending_app = None
         
         if app.isTerminated():
+            print(f"[SKIP] {app_name} already terminated before auth")
             self.pending_auth = False
             return
         
-        # Show auth dialog (app stays visible but dialog is modal)
         success = authenticate(app_name)
         
         if success:
             print(f"✅ Authenticated: {app_name}")
             self.authenticated_pids.add(pid)
-            # App is already visible, just activate it
-            if not app.isTerminated():
-                app.activateWithOptions_(1)
+            self.authenticated_apps[app_name] = time.time()  # Start grace period
+            # Don't do anything else - let the app run naturally
         else:
             print(f"❌ Auth failed, terminating: {app_name}")
             if not app.isTerminated():
