@@ -178,23 +178,46 @@ def show_password_dialog(app_name):
 # ============== MAIN LOCKER ==============
 
 class AppLocker:
+    # Grace period in seconds - app won't be blocked again after unlock
+    GRACE_PERIOD = 60  # 1 minute grace period after unlock
+
     def __init__(self):
         self.config = load_config()
         self.locked_pids = set()  # Track PIDs we've already handled
+        self.unlocked_apps = {}   # Track app_keyword -> unlock_timestamp
         self.running = False
         self.handling_lock = threading.Lock()
 
-    def is_locked_app(self, proc_name):
-        """Check if process name matches any locked app (case-insensitive partial match)."""
+    def get_matching_keyword(self, proc_name):
+        """Get the locked app keyword that matches this process name."""
         proc_name_lower = proc_name.lower()
         for locked_app in self.config["locked_apps"]:
             if locked_app.lower() in proc_name_lower:
-                return True
-        return False
+                return locked_app.lower()
+        return None
+
+    def is_locked_app(self, proc_name):
+        """Check if process name matches any locked app (case-insensitive partial match)."""
+        keyword = self.get_matching_keyword(proc_name)
+        if keyword is None:
+            return False
+
+        # Check if this app was recently unlocked (grace period)
+        with self.handling_lock:
+            if keyword in self.unlocked_apps:
+                unlock_time = self.unlocked_apps[keyword]
+                if time.time() - unlock_time < self.GRACE_PERIOD:
+                    return False  # Still in grace period, don't block
+                else:
+                    # Grace period expired, remove from unlocked
+                    del self.unlocked_apps[keyword]
+
+        return True
 
     def handle_locked_app(self, proc, display_name):
         """Handle a detected locked app - KILL FIRST, ASK LATER."""
         pid = proc.pid
+        keyword = self.get_matching_keyword(display_name)
 
         # Thread-safe check if already handling
         with self.handling_lock:
@@ -214,15 +237,19 @@ class AppLocker:
             authenticated = show_password_dialog(display_name)
 
             if authenticated:
+                # Add to unlocked apps with grace period
+                with self.handling_lock:
+                    self.unlocked_apps[keyword] = time.time()
+
                 # Relaunch the app
-                print(f"✅ {display_name} unlocked - relaunching...")
+                print(f"✅ {display_name} unlocked (grace: {self.GRACE_PERIOD}s)")
                 open_app(display_name)
             else:
                 print(f"❌ {display_name} access denied")
 
         finally:
-            # Remove from tracked PIDs after a delay (prevent rapid re-triggering)
-            time.sleep(1)
+            # Remove from tracked PIDs
+            time.sleep(0.5)
             with self.handling_lock:
                 self.locked_pids.discard(pid)
 
@@ -301,16 +328,16 @@ def add_app():
     for app in config["locked_apps"]:
         print(f"  - {app}")
 
-    print("\nTip: Use the app name as it appears in Activity Monitor")
-    print("Common names: WhatsApp, Telegram, Discord, Slack, Messages")
-    app_name = input("\nEnter app name (e.g., Spotify): ").strip()
+    print("\nTip: Enter a keyword (partial match, case-insensitive)")
+    print("Examples: whatsapp, telegram, discord, slack, messages, chrome")
+    app_name = input("\nEnter app keyword: ").strip().lower()
 
-    if app_name not in config["locked_apps"]:
+    if app_name and app_name not in config["locked_apps"]:
         config["locked_apps"].append(app_name)
         save_config(config)
-        print(f"✅ Added {app_name} to lock list")
+        print(f"✅ Added '{app_name}' to lock list")
     else:
-        print(f"⚠️ {app_name} is already in the list")
+        print(f"⚠️ '{app_name}' is already in the list or empty")
 
 def remove_app():
     """Remove an app from the lock list."""
